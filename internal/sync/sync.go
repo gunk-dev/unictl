@@ -7,7 +7,7 @@ package sync
 import (
 	"context"
 	"errors"
-	"strings"
+	"sort"
 
 	"github.com/gunk-dev/unictl/internal/events"
 	"github.com/gunk-dev/unictl/internal/unifi"
@@ -55,11 +55,11 @@ func Build(ctx context.Context, c Controller, desired events.DesiredState) (Plan
 	}
 	liveSet := map[string]struct{}{}
 	for _, u := range live {
-		liveSet[normalize(u.MAC)] = struct{}{}
+		liveSet[events.Normalize(u.MAC)] = struct{}{}
 	}
 	desiredSet := map[string]events.BlockedClient{}
 	for _, b := range desired.Blocked {
-		desiredSet[normalize(b.MAC)] = b
+		desiredSet[events.Normalize(b.MAC)] = b
 	}
 
 	var ops []Op
@@ -144,18 +144,12 @@ func (p Plan) HasSuccesses() bool {
 	return false
 }
 
-func normalize(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
-
 func sortOps(ops []Op) {
 	// Deterministic ordering: blocks first, then unblocks, MAC ascending.
 	// Avoids spurious diffs in test fixtures and CI output.
-	for i := 0; i < len(ops); i++ {
-		for j := i + 1; j < len(ops); j++ {
-			if less(ops[j], ops[i]) {
-				ops[i], ops[j] = ops[j], ops[i]
-			}
-		}
-	}
+	sort.Slice(ops, func(i, j int) bool {
+		return less(ops[i], ops[j])
+	})
 }
 
 func less(a, b Op) bool {
