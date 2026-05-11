@@ -15,9 +15,13 @@ var EventsCUE []byte
 //go:embed state.cue
 var StateCUE []byte
 
+//go:embed resources.cue
+var ResourcesCUE []byte
+
 // Files is the set of CUE schema files keyed by basename, for tools that
 // want to iterate (e.g. `unictl schema --raw`).
 var Files = map[string][]byte{
-	"events.cue": EventsCUE,
-	"state.cue":  StateCUE,
+	"events.cue":    EventsCUE,
+	"state.cue":     StateCUE,
+	"resources.cue": ResourcesCUE,
 }

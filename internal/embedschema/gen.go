@@ -6,3 +6,4 @@ package embedschema
 
 //go:generate cp ../../schema/events.cue events.cue
 //go:generate cp ../../schema/state.cue state.cue
+//go:generate cp ../../schema/resources.cue resources.cue

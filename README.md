@@ -4,14 +4,14 @@ Declarative reconciler + observability CLI for [UniFi Network](https://ui.com/) 
 
 `unictl` is built to be useful to anyone running a UniFi Network controller. It is JSON-first and agent-friendly by default: every successful response is wrapped as `{"$schema": "unifi-v1", "data": ...}`, every failure is a structured error on stderr with stable exit codes. A single `unictl --help-all` call dumps the full command tree, flag list, exit-code matrix, and error envelope so an agent can learn the whole surface in one shot.
 
-## What's in this PR (v0.1.0)
+## What's in unictl today
 
-- `unictl sync` — folds an event log, plans block / unblock operations against the controller, and (with `--apply`) executes them.
-- `unictl schema` — dumps the CUE schemas for events and derived state.
+- `unictl sync` — plans and applies both **events** (timestamped block/unblock actions) and **declarative resources** (VLANs, WLANs, firewall rules, port forwards) against the controller.
+- `unictl schema` — dumps the CUE schemas for events, derived state, and resources.
 - `unictl version`, `unictl --help-all` — release identifiers + machine-readable discovery.
 - Local API-key auth (`X-API-KEY`) for UniFi Network 8.x+.
 
-Read commands (`list`, `get`) and ephemeral writes (`do kick`, `do reboot-port`) are intentionally out of scope here; they follow in later PRs.
+Read commands (`list`, `get`) and ephemeral writes (`do kick`, `do reboot-port`) are intentionally out of scope; they follow in later PRs.
 
 ## Quick start
 
@@ -64,22 +64,26 @@ Sample output:
 {
   "$schema": "unifi-v1",
   "data": {
-    "plan": [
-      {
-        "op": "block",
-        "mac": "aa:bb:cc:dd:ee:01",
-        "reason": "Unpatched IoT camera, isolate until firmware update lands",
-        "before": "unblocked",
-        "after": "blocked",
-        "status": "planned"
-      }
-    ],
-    "dry_run": true,
-    "applied": false,
-    "site": "default"
+    "events": {
+      "plan": [
+        {
+          "op": "block",
+          "mac": "aa:bb:cc:dd:ee:01",
+          "reason": "Unpatched IoT camera, isolate until firmware update lands",
+          "before": "unblocked",
+          "after": "blocked",
+          "status": "planned"
+        }
+      ],
+      "dry_run": true,
+      "applied": false,
+      "site": "default"
+    }
   }
 }
 ```
+
+When the input also declares resources, the envelope adds a `resources` sub-plan next to `events`; either field may be absent if that axis has nothing to do.
 
 Happy with the plan? Run it for real:
 
@@ -110,6 +114,40 @@ To answer "what should the controller look like right now?", `unictl` sorts the 
 
 `unictl sync` diffs the folded desired state against the live controller and emits a plan. With `--apply`, the plan runs.
 
+### Declarative resources
+
+The other persistence model is **persistent declarative resources** — long-lived controller objects (VLANs/subnets, WLANs, firewall rules, port forwards) that you want to exist in a particular shape. Resources are matched by their user-stable `name`, not by controller-internal IDs. Anything `unictl` creates carries an `app=unictl` marker in the resource's `note` field so pruning can distinguish managed from unmanaged objects.
+
+The split is intentional: events model time-bounded, action-shaped state ("block this MAC at 14:03 for the next 24h"); resources model the standing config of the network. Both live in the same `unictl sync` flow.
+
+```cue
+networks: [
+	{name: "iot", purpose: "corporate", subnet: "10.0.42.0/24", vlan: 42},
+]
+
+wlans: [
+	{name: "home-iot", network: "iot", security: "wpapsk", password_env: "WLAN_HOME_PSK", band: "both"},
+]
+
+firewall_rules: [
+	{name: "drop-iot-to-lan", action: "drop", ruleset: "LAN_IN", src_address: "10.0.42.0/24", dst_address: "10.0.0.0/24"},
+]
+
+port_forwards: [
+	{name: "home-assistant", source: "any", src_port: "8123", dst_address: "10.0.42.10", dst_port: "8123", protocol: "tcp"},
+]
+```
+
+WLAN passwords are never inline. Each WLAN names a `password_env` — an env var the reconciler reads at apply time. Dry-runs render the reference as `@env:WLAN_HOME_PSK`; `unictl sync --apply` fails loud if the env var is unset.
+
+Pruning is non-destructive by default. Resources marked managed (`app=unictl`) but absent from the declared config stay in place unless you pass `--prune`. Unmanaged resources are never deleted.
+
+```
+unictl sync examples/             # dry-run: plans both events and resources
+unictl sync examples/ --apply     # applies the plan
+unictl sync examples/ --apply --prune   # also deletes managed-but-undeclared resources
+```
+
 ## CLI reference
 
 | Command | Description |
@@ -117,11 +155,12 @@ To answer "what should the controller look like right now?", `unictl` sorts the 
 | `unictl version` | Version + git SHA as JSON. |
 | `unictl schema` | Dump the embedded CUE schemas. |
 | `unictl --help-all` | Full command tree + flags + schemas + exit-code matrix as one JSON document. |
-| `unictl sync <path>` | Fold the event log at `<path>` and emit a plan. Defaults to `--dry-run`; pass `--apply` to mutate the controller. |
+| `unictl sync <path>` | Load events (`events*.cue`) and/or resources (`resources*.cue`) from `<path>` and emit a plan. Defaults to `--dry-run`; pass `--apply` to mutate the controller. |
 
 Flags common to `sync`:
 
 - `--apply` — execute the plan (default: dry-run).
+- `--prune` — delete controller resources marked managed (`app=unictl`) but absent from the declared config. Default false.
 - `--insecure` — skip TLS verification (or set `UNIFI_INSECURE=1`).
 - `--site` — UniFi site short-name. Default `default`.
 
