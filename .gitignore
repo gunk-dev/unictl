@@ -1,0 +1,27 @@
+# Build outputs
+/result
+/result-*
+/dist
+/bin
+/unictl
+
+# Go
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local env
+.env
+.env.local
+.claude/
