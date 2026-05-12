@@ -2,6 +2,8 @@ package resourcesync
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/gunk-dev/unictl/internal/resources"
@@ -261,5 +263,163 @@ func TestStampMarkerPreservesExistingNote(t *testing.T) {
 	}
 	if got == unifi.UniCtlMarker {
 		t.Fatalf("expected operator note preserved, got just the marker")
+	}
+}
+
+// TestUpdatePreservesOperatorNote guards the regression where an update
+// would PUT just the marker, wiping any operator-written note prefix.
+func TestUpdatePreservesOperatorNote(t *testing.T) {
+	fc := &fakeController{
+		networks: []unifi.Network{{
+			ID: "n1", Name: "iot", Purpose: "corporate", VLAN: 42,
+			Subnet: "10.0.42.0/24", Note: "operator: keep me app=unictl",
+		}},
+	}
+	cfg := resources.NetworkConfig{
+		Networks: []resources.Network{{Name: "iot", Purpose: "corporate", VLAN: 42, Subnet: "10.0.99.0/24"}},
+	}
+	plan, err := Build(context.Background(), fc, cfg, false)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	Apply(context.Background(), fc, &plan)
+	if len(fc.updatedNets) != 1 {
+		t.Fatalf("want one UpdateNetwork call, got %+v", fc.updatedNets)
+	}
+	if !strings.Contains(fc.updatedNets[0].Note, "operator: keep me") {
+		t.Fatalf("operator note clobbered, got note=%q", fc.updatedNets[0].Note)
+	}
+	if !IsManaged(fc.updatedNets[0].Note) {
+		t.Fatalf("marker missing after update, got note=%q", fc.updatedNets[0].Note)
+	}
+}
+
+// TestUpdateAdoptsUnmarkedResource guards the case where a declared
+// resource matches an unmanaged controller record but has drift: the
+// update must stamp the marker (so future `--prune` sees it as managed)
+// without dropping the operator's note.
+func TestUpdateAdoptsUnmarkedResource(t *testing.T) {
+	fc := &fakeController{
+		networks: []unifi.Network{{
+			ID: "n1", Name: "iot", Purpose: "corporate", VLAN: 42,
+			Subnet: "10.0.42.0/24", Note: "hand-rolled",
+		}},
+	}
+	cfg := resources.NetworkConfig{
+		Networks: []resources.Network{{Name: "iot", Purpose: "corporate", VLAN: 99, Subnet: "10.0.42.0/24"}},
+	}
+	plan, err := Build(context.Background(), fc, cfg, false)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	Apply(context.Background(), fc, &plan)
+	if len(fc.updatedNets) != 1 {
+		t.Fatalf("want one UpdateNetwork, got %+v", fc.updatedNets)
+	}
+	if !IsManaged(fc.updatedNets[0].Note) {
+		t.Fatalf("expected adoption to add marker, got note=%q", fc.updatedNets[0].Note)
+	}
+	if !strings.Contains(fc.updatedNets[0].Note, "hand-rolled") {
+		t.Fatalf("operator note dropped during adoption, got note=%q", fc.updatedNets[0].Note)
+	}
+}
+
+// TestPlanRoundTripsThroughJSON guards against integer fields being
+// silently lost when a plan is marshaled to JSON, saved, and replayed
+// later — JSON decodes numbers as float64, so the *FromDiff readers
+// must accept both int and float64.
+func TestPlanRoundTripsThroughJSON(t *testing.T) {
+	fc := &fakeController{}
+	cfg := resources.NetworkConfig{
+		Networks: []resources.Network{{Name: "iot", Purpose: "corporate", VLAN: 42, Subnet: "10.0.42.0/24"}},
+	}
+	plan, err := Build(context.Background(), fc, cfg, false)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	blob, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var roundTripped Plan
+	if err := json.Unmarshal(blob, &roundTripped); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	Apply(context.Background(), fc, &roundTripped)
+	if roundTripped.HasFailures() {
+		t.Fatalf("apply failed: %+v", roundTripped)
+	}
+	if len(fc.createdNets) != 1 || fc.createdNets[0].VLAN != 42 {
+		t.Fatalf("VLAN lost across JSON round-trip: %+v", fc.createdNets)
+	}
+}
+
+// TestSortOrderRespectsDependencies pins the ordering contract: creates
+// run in dependency order (Network → Wlan → Firewall → PortForward),
+// deletes run in reverse so referenced parents outlive their dependents.
+func TestSortOrderRespectsDependencies(t *testing.T) {
+	fc := &fakeController{
+		networks:      []unifi.Network{{ID: "n-old", Name: "old-net", Note: unifi.UniCtlMarker}},
+		wlans:         []unifi.WlanConf{{ID: "w-old", Name: "old-wlan", Note: unifi.UniCtlMarker}},
+		firewallRules: []unifi.FirewallRule{{ID: "f-old", Name: "old-fw", Note: unifi.UniCtlMarker}},
+		portForwards:  []unifi.PortForward{{ID: "p-old", Name: "old-pf", Note: unifi.UniCtlMarker}},
+	}
+	cfg := resources.NetworkConfig{
+		Networks:      []resources.Network{{Name: "new-net", Purpose: "corporate"}},
+		Wlans:         []resources.Wlan{{Name: "new-wlan", Network: "new-net", Security: "open", Band: "both"}},
+		FirewallRules: []resources.FirewallRule{{Name: "new-fw", Action: "drop", Ruleset: "LAN_IN"}},
+		PortForwards:  []resources.PortForward{{Name: "new-pf", SrcPort: "80", DstAddress: "10.0.0.1", DstPort: "80", Protocol: "tcp"}},
+	}
+	plan, err := Build(context.Background(), fc, cfg, true)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	wantOps := []string{
+		OpCreateNetwork,
+		OpCreateWlan,
+		OpCreateFirewall,
+		OpCreatePortForward,
+		OpDeletePortForward,
+		OpDeleteFirewall,
+		OpDeleteWlan,
+		OpDeleteNetwork,
+	}
+	if len(plan.Plan) != len(wantOps) {
+		t.Fatalf("want %d ops, got %d: %+v", len(wantOps), len(plan.Plan), plan.Plan)
+	}
+	for i, want := range wantOps {
+		if plan.Plan[i].Op != want {
+			t.Fatalf("op[%d]=%q, want %q (full plan: %+v)", i, plan.Plan[i].Op, want, plan.Plan)
+		}
+	}
+}
+
+// TestDiffClearsRemovedOptionalFields guards the declarative promise
+// that removing an optional value from CUE clears it on the controller.
+func TestDiffClearsRemovedOptionalFields(t *testing.T) {
+	fc := &fakeController{
+		firewallRules: []unifi.FirewallRule{{
+			ID: "f1", Name: "drop-iot", Action: "drop", Ruleset: "LAN_IN",
+			Protocol: "tcp", SrcAddress: "10.0.42.0/24",
+		}},
+	}
+	cfg := resources.NetworkConfig{
+		// Drop protocol and src_address from the declaration; the diff
+		// should propose clearing them on the controller.
+		FirewallRules: []resources.FirewallRule{{Name: "drop-iot", Action: "drop", Ruleset: "LAN_IN"}},
+	}
+	plan, err := Build(context.Background(), fc, cfg, false)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(plan.Plan) != 1 || plan.Plan[0].Op != OpUpdateFirewall {
+		t.Fatalf("want one update_firewall_rule, got %+v", plan.Plan)
+	}
+	d := plan.Plan[0].Diff
+	if got, ok := d["protocol"].(string); !ok || got != "" {
+		t.Fatalf("expected protocol cleared in diff, got %v", d["protocol"])
+	}
+	if got, ok := d["src_address"].(string); !ok || got != "" {
+		t.Fatalf("expected src_address cleared in diff, got %v", d["src_address"])
 	}
 }

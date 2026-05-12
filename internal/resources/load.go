@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -13,6 +14,29 @@ import (
 
 	"github.com/gunk-dev/unictl/internal/embedschema"
 )
+
+// topLevelKeys is the set of CUE field names the loader projects out of
+// each resources file. Derived once from the JSON tags on NetworkConfig
+// so the Go struct is the single source of truth — adding a new resource
+// type requires adding a struct field, not editing this loader.
+var topLevelKeys = networkConfigJSONKeys()
+
+func networkConfigJSONKeys() []string {
+	t := reflect.TypeOf(NetworkConfig{})
+	keys := make([]string, 0, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		tag := t.Field(i).Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		name := strings.SplitN(tag, ",", 2)[0]
+		if name == "" {
+			continue
+		}
+		keys = append(keys, name)
+	}
+	return keys
+}
 
 // schemaInstance compiles the bundled resources.cue schema into a
 // reusable CUE value. Built lazily per Load call to keep startup cost
@@ -119,10 +143,12 @@ func loadFile(ctx *cue.Context, configDef cue.Value, path string) (NetworkConfig
 	}
 
 	// Files in this repo declare `package schema`, so the actual config
-	// payload sits as top-level fields. Build a #NetworkConfig view by
-	// selecting only the known fields and unifying against the schema.
+	// payload sits as top-level fields. Project just the resource fields
+	// (derived from NetworkConfig's JSON tags) and unify against the
+	// schema; this keeps unrelated package metadata from leaking into
+	// validation while not hardcoding the field list in the loader.
 	view := ctx.CompileString("{}")
-	for _, name := range []string{"networks", "wlans", "firewall_rules", "port_forwards"} {
+	for _, name := range topLevelKeys {
 		v := val.LookupPath(cue.ParsePath(name))
 		if v.Exists() {
 			view = view.FillPath(cue.ParsePath(name), v)

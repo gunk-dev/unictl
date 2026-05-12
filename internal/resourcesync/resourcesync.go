@@ -197,7 +197,6 @@ func applyOne(ctx context.Context, c Controller, op *Op) error {
 		if err != nil {
 			return err
 		}
-		n.Note = stampMarker(n.Note)
 		_, err = c.CreateNetwork(ctx, n)
 		return err
 	case OpUpdateNetwork:
@@ -205,7 +204,6 @@ func applyOne(ctx context.Context, c Controller, op *Op) error {
 		if err != nil {
 			return err
 		}
-		n.Note = stampMarker(n.Note)
 		return c.UpdateNetwork(ctx, n)
 	case OpDeleteNetwork:
 		return c.DeleteNetwork(ctx, idFromDiff(op))
@@ -218,7 +216,6 @@ func applyOne(ctx context.Context, c Controller, op *Op) error {
 		if err := resolveWlanSecret(op, &w); err != nil {
 			return err
 		}
-		w.Note = stampMarker(w.Note)
 		_, err = c.CreateWlan(ctx, w)
 		return err
 	case OpUpdateWlan:
@@ -229,7 +226,6 @@ func applyOne(ctx context.Context, c Controller, op *Op) error {
 		if err := resolveWlanSecret(op, &w); err != nil {
 			return err
 		}
-		w.Note = stampMarker(w.Note)
 		return c.UpdateWlan(ctx, w)
 	case OpDeleteWlan:
 		return c.DeleteWlan(ctx, idFromDiff(op))
@@ -239,7 +235,6 @@ func applyOne(ctx context.Context, c Controller, op *Op) error {
 		if err != nil {
 			return err
 		}
-		r.Note = stampMarker(r.Note)
 		_, err = c.CreateFirewallRule(ctx, r)
 		return err
 	case OpUpdateFirewall:
@@ -247,7 +242,6 @@ func applyOne(ctx context.Context, c Controller, op *Op) error {
 		if err != nil {
 			return err
 		}
-		r.Note = stampMarker(r.Note)
 		return c.UpdateFirewallRule(ctx, r)
 	case OpDeleteFirewall:
 		return c.DeleteFirewallRule(ctx, idFromDiff(op))
@@ -257,7 +251,6 @@ func applyOne(ctx context.Context, c Controller, op *Op) error {
 		if err != nil {
 			return err
 		}
-		pf.Note = stampMarker(pf.Note)
 		_, err = c.CreatePortForward(ctx, pf)
 		return err
 	case OpUpdatePortForward:
@@ -265,7 +258,6 @@ func applyOne(ctx context.Context, c Controller, op *Op) error {
 		if err != nil {
 			return err
 		}
-		pf.Note = stampMarker(pf.Note)
 		return c.UpdatePortForward(ctx, pf)
 	case OpDeletePortForward:
 		return c.DeletePortForward(ctx, idFromDiff(op))
@@ -350,19 +342,22 @@ func networkToWire(n resources.Network) unifi.Network {
 
 func diffNetwork(cur, want unifi.Network) map[string]any {
 	diff := map[string]any{}
+	// purpose is required in the schema; never propose clearing it.
 	if cur.Purpose != want.Purpose && want.Purpose != "" {
 		diff["purpose"] = want.Purpose
 	}
-	if cur.Subnet != want.Subnet && want.Subnet != "" {
+	// Optional fields below: a missing CUE value should clear the
+	// controller-side value too, per the declarative promise.
+	if cur.Subnet != want.Subnet {
 		diff["ip_subnet"] = want.Subnet
 	}
-	if cur.VLAN != want.VLAN && want.VLAN != 0 {
+	if cur.VLAN != want.VLAN {
 		diff["vlan"] = want.VLAN
 	}
-	if want.DHCPDStart != "" && cur.DHCPDStart != want.DHCPDStart {
+	if cur.DHCPDStart != want.DHCPDStart {
 		diff["dhcpd_start"] = want.DHCPDStart
 	}
-	if want.DHCPDStop != "" && cur.DHCPDStop != want.DHCPDStop {
+	if cur.DHCPDStop != want.DHCPDStop {
 		diff["dhcpd_stop"] = want.DHCPDStop
 	}
 	if want.DHCPDEnable != nil && !boolEq(cur.DHCPDEnable, want.DHCPDEnable) {
@@ -375,6 +370,11 @@ func diffNetwork(cur, want unifi.Network) map[string]any {
 		return nil
 	}
 	diff["_id"] = cur.ID
+	// Carry the note on every update so PUT preserves operator-written
+	// content and stamps the marker if missing. Without this, the PUT's
+	// "note" field would be omitted (or worse, sent empty) and the
+	// controller could clobber an operator's existing note.
+	diff["note"] = stampMarker(cur.Note)
 	return diff
 }
 
@@ -398,6 +398,7 @@ func networkDiff(n unifi.Network) map[string]any {
 	if n.Enabled != nil {
 		d["enabled"] = *n.Enabled
 	}
+	d["note"] = stampMarker(n.Note)
 	return d
 }
 
@@ -472,6 +473,7 @@ func wlanToWire(w resources.Wlan) unifi.WlanConf {
 
 func diffWlan(cur, want unifi.WlanConf, d resources.Wlan) map[string]any {
 	diff := map[string]any{}
+	// security and band are required in the schema; never propose clearing.
 	if cur.Security != want.Security && want.Security != "" {
 		diff["security"] = want.Security
 	}
@@ -495,6 +497,7 @@ func diffWlan(cur, want unifi.WlanConf, d resources.Wlan) map[string]any {
 		return nil
 	}
 	diff["_id"] = cur.ID
+	diff["note"] = stampMarker(cur.Note)
 	return diff
 }
 
@@ -516,6 +519,7 @@ func wlanDiff(want unifi.WlanConf, d resources.Wlan) map[string]any {
 	if d.PasswordEnv != "" {
 		out["x_passphrase"] = resources.Placeholder(d.PasswordEnv)
 	}
+	out["note"] = stampMarker(want.Note)
 	return out
 }
 
@@ -612,25 +616,28 @@ func firewallToWire(r resources.FirewallRule) unifi.FirewallRule {
 
 func diffFirewall(cur, want unifi.FirewallRule) map[string]any {
 	diff := map[string]any{}
+	// action and ruleset are required in the schema; never propose clearing.
 	if cur.Action != want.Action && want.Action != "" {
 		diff["action"] = want.Action
 	}
 	if cur.Ruleset != want.Ruleset && want.Ruleset != "" {
 		diff["ruleset"] = want.Ruleset
 	}
-	if cur.Protocol != want.Protocol && want.Protocol != "" {
+	// Optional fields below: missing CUE values clear the controller-side
+	// value to match the declarative source of truth.
+	if cur.Protocol != want.Protocol {
 		diff["protocol"] = want.Protocol
 	}
-	if cur.SrcAddress != want.SrcAddress && want.SrcAddress != "" {
+	if cur.SrcAddress != want.SrcAddress {
 		diff["src_address"] = want.SrcAddress
 	}
-	if cur.SrcPort != want.SrcPort && want.SrcPort != "" {
+	if cur.SrcPort != want.SrcPort {
 		diff["src_port"] = want.SrcPort
 	}
-	if cur.DstAddress != want.DstAddress && want.DstAddress != "" {
+	if cur.DstAddress != want.DstAddress {
 		diff["dst_address"] = want.DstAddress
 	}
-	if cur.DstPort != want.DstPort && want.DstPort != "" {
+	if cur.DstPort != want.DstPort {
 		diff["dst_port"] = want.DstPort
 	}
 	if want.Enabled != nil && !boolEq(cur.Enabled, want.Enabled) {
@@ -640,6 +647,7 @@ func diffFirewall(cur, want unifi.FirewallRule) map[string]any {
 		return nil
 	}
 	diff["_id"] = cur.ID
+	diff["note"] = stampMarker(cur.Note)
 	return diff
 }
 
@@ -667,6 +675,7 @@ func firewallDiff(r unifi.FirewallRule) map[string]any {
 	if r.Enabled != nil {
 		out["enabled"] = *r.Enabled
 	}
+	out["note"] = stampMarker(r.Note)
 	return out
 }
 
@@ -745,6 +754,8 @@ func portForwardToWire(p resources.PortForward) unifi.PortForward {
 
 func diffPortForward(cur, want unifi.PortForward) map[string]any {
 	diff := map[string]any{}
+	// All these fields are required in the schema (or have a defaulting
+	// rule applied in portForwardToWire), so plain inequality is enough.
 	if cur.Src != want.Src && want.Src != "" {
 		diff["src"] = want.Src
 	}
@@ -767,6 +778,7 @@ func diffPortForward(cur, want unifi.PortForward) map[string]any {
 		return nil
 	}
 	diff["_id"] = cur.ID
+	diff["note"] = stampMarker(cur.Note)
 	return diff
 }
 
@@ -782,6 +794,7 @@ func portForwardDiff(p unifi.PortForward) map[string]any {
 	if p.Enabled != nil {
 		out["enabled"] = *p.Enabled
 	}
+	out["note"] = stampMarker(p.Note)
 	return out
 }
 
@@ -802,27 +815,18 @@ func networkFromDiff(op *Op) (unifi.Network, error) {
 	if op.Op == OpUpdateNetwork {
 		n.ID = idFromDiff(op)
 	}
-	if v, ok := op.Diff["purpose"].(string); ok {
-		n.Purpose = v
-	}
-	if v, ok := op.Diff["ip_subnet"].(string); ok {
-		n.Subnet = v
-	}
-	if v, ok := op.Diff["vlan"].(int); ok {
-		n.VLAN = v
-	}
-	if v, ok := op.Diff["dhcpd_start"].(string); ok {
-		n.DHCPDStart = v
-	}
-	if v, ok := op.Diff["dhcpd_stop"].(string); ok {
-		n.DHCPDStop = v
-	}
-	if v, ok := op.Diff["dhcpd_enabled"].(bool); ok {
+	n.Purpose = stringFromDiff(op, "purpose")
+	n.Subnet = stringFromDiff(op, "ip_subnet")
+	n.VLAN = intFromDiff(op, "vlan")
+	n.DHCPDStart = stringFromDiff(op, "dhcpd_start")
+	n.DHCPDStop = stringFromDiff(op, "dhcpd_stop")
+	if v, ok := boolFromDiff(op, "dhcpd_enabled"); ok {
 		n.DHCPDEnable = &v
 	}
-	if v, ok := op.Diff["enabled"].(bool); ok {
+	if v, ok := boolFromDiff(op, "enabled"); ok {
 		n.Enabled = &v
 	}
+	n.Note = stringFromDiff(op, "note")
 	return n, nil
 }
 
@@ -831,18 +835,15 @@ func wlanFromDiff(op *Op) (unifi.WlanConf, error) {
 	if op.Op == OpUpdateWlan {
 		w.ID = idFromDiff(op)
 	}
-	if v, ok := op.Diff["security"].(string); ok {
-		w.Security = v
-	}
-	if v, ok := op.Diff["wlan_band"].(string); ok {
-		w.Band = v
-	}
-	if v, ok := op.Diff["hide_ssid"].(bool); ok {
+	w.Security = stringFromDiff(op, "security")
+	w.Band = stringFromDiff(op, "wlan_band")
+	if v, ok := boolFromDiff(op, "hide_ssid"); ok {
 		w.HideSSID = &v
 	}
-	if v, ok := op.Diff["enabled"].(bool); ok {
+	if v, ok := boolFromDiff(op, "enabled"); ok {
 		w.Enabled = &v
 	}
+	w.Note = stringFromDiff(op, "note")
 	return w, nil
 }
 
@@ -851,30 +852,17 @@ func firewallFromDiff(op *Op) (unifi.FirewallRule, error) {
 	if op.Op == OpUpdateFirewall {
 		r.ID = idFromDiff(op)
 	}
-	if v, ok := op.Diff["action"].(string); ok {
-		r.Action = v
-	}
-	if v, ok := op.Diff["ruleset"].(string); ok {
-		r.Ruleset = v
-	}
-	if v, ok := op.Diff["protocol"].(string); ok {
-		r.Protocol = v
-	}
-	if v, ok := op.Diff["src_address"].(string); ok {
-		r.SrcAddress = v
-	}
-	if v, ok := op.Diff["src_port"].(string); ok {
-		r.SrcPort = v
-	}
-	if v, ok := op.Diff["dst_address"].(string); ok {
-		r.DstAddress = v
-	}
-	if v, ok := op.Diff["dst_port"].(string); ok {
-		r.DstPort = v
-	}
-	if v, ok := op.Diff["enabled"].(bool); ok {
+	r.Action = stringFromDiff(op, "action")
+	r.Ruleset = stringFromDiff(op, "ruleset")
+	r.Protocol = stringFromDiff(op, "protocol")
+	r.SrcAddress = stringFromDiff(op, "src_address")
+	r.SrcPort = stringFromDiff(op, "src_port")
+	r.DstAddress = stringFromDiff(op, "dst_address")
+	r.DstPort = stringFromDiff(op, "dst_port")
+	if v, ok := boolFromDiff(op, "enabled"); ok {
 		r.Enabled = &v
 	}
+	r.Note = stringFromDiff(op, "note")
 	return r, nil
 }
 
@@ -883,24 +871,15 @@ func portForwardFromDiff(op *Op) (unifi.PortForward, error) {
 	if op.Op == OpUpdatePortForward {
 		p.ID = idFromDiff(op)
 	}
-	if v, ok := op.Diff["src"].(string); ok {
-		p.Src = v
-	}
-	if v, ok := op.Diff["src_port"].(string); ok {
-		p.SrcPort = v
-	}
-	if v, ok := op.Diff["fwd"].(string); ok {
-		p.DstAddress = v
-	}
-	if v, ok := op.Diff["fwd_port"].(string); ok {
-		p.DstPort = v
-	}
-	if v, ok := op.Diff["proto"].(string); ok {
-		p.Protocol = v
-	}
-	if v, ok := op.Diff["enabled"].(bool); ok {
+	p.Src = stringFromDiff(op, "src")
+	p.SrcPort = stringFromDiff(op, "src_port")
+	p.DstAddress = stringFromDiff(op, "fwd")
+	p.DstPort = stringFromDiff(op, "fwd_port")
+	p.Protocol = stringFromDiff(op, "proto")
+	if v, ok := boolFromDiff(op, "enabled"); ok {
 		p.Enabled = &v
 	}
+	p.Note = stringFromDiff(op, "note")
 	return p, nil
 }
 
@@ -924,6 +903,35 @@ func stringFromDiff(op *Op, key string) string {
 	return ""
 }
 
+// intFromDiff reads an integer-valued diff field. The Diff map round-trips
+// through JSON in tools that save and re-apply plans, where numbers come
+// back as float64. Accept both shapes so saved plans behave identically
+// to in-process ones.
+func intFromDiff(op *Op, key string) int {
+	if op.Diff == nil {
+		return 0
+	}
+	switch v := op.Diff[key].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	}
+	return 0
+}
+
+// boolFromDiff reads a bool-valued diff field. Returns ok=false if the
+// key is absent so callers can leave optional `*bool` fields nil.
+func boolFromDiff(op *Op, key string) (bool, bool) {
+	if op.Diff == nil {
+		return false, false
+	}
+	v, ok := op.Diff[key].(bool)
+	return v, ok
+}
+
 // kindOrder is the deterministic kind-ordering used by sortOps so the
 // plan reads top-down by resource type.
 var kindOrder = map[string]int{
@@ -933,16 +941,46 @@ var kindOrder = map[string]int{
 	KindPortForward: 3,
 }
 
+// sortOps orders the plan so dependencies are respected at apply time.
+// Creates and updates run first, in dependency order (Network → Wlan →
+// Firewall → PortForward) — a WLAN that names a network needs the
+// network in place; a firewall rule that names an interface needs that
+// interface to exist. Deletes run last, in reverse dependency order, so
+// a referenced network isn't deleted while a WLAN still points at it.
+// Within an op-class, ties break by name for stable, readable output.
 func sortOps(ops []Op) {
 	sort.SliceStable(ops, func(i, j int) bool {
-		if kindOrder[ops[i].Kind] != kindOrder[ops[j].Kind] {
-			return kindOrder[ops[i].Kind] < kindOrder[ops[j].Kind]
+		phaseI, phaseJ := opPhase(ops[i].Op), opPhase(ops[j].Op)
+		if phaseI != phaseJ {
+			return phaseI < phaseJ
+		}
+		ki, kj := kindOrder[ops[i].Kind], kindOrder[ops[j].Kind]
+		if ki != kj {
+			if phaseI == phaseDelete {
+				return ki > kj
+			}
+			return ki < kj
 		}
 		if ops[i].Op != ops[j].Op {
 			return opOrder(ops[i].Op) < opOrder(ops[j].Op)
 		}
 		return ops[i].Name < ops[j].Name
 	})
+}
+
+// opPhase groups ops into create/update vs delete. We split these so
+// deletes can run in reverse dependency order without disrupting the
+// natural top-down order of create/update.
+const (
+	phaseCreateUpdate = 0
+	phaseDelete       = 1
+)
+
+func opPhase(op string) int {
+	if strings.HasPrefix(op, "delete_") {
+		return phaseDelete
+	}
+	return phaseCreateUpdate
 }
 
 // opOrder ranks ops within a kind: create < update < delete.
